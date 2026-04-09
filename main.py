@@ -1378,11 +1378,6 @@ def move_poll():
     """Robot polls for movement commands."""
     return _movement_cmd
 
-@app.get("/servo/poll")
-def servo_poll():
-    """ken-vision polls for face tracking data to send servo commands to brain."""
-    return _face_tracking
-
 @app.post("/servo")
 async def servo_command(request: Request):
     """Direct servo control. Body: {"pan": 90, "tilt": 90} or {"action": "center"}"""
