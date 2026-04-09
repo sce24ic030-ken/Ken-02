@@ -664,6 +664,9 @@ _alive_enabled = False  # FIXED: Initialize before first use (was undefined at l
 # Movement command queue (robot polls this)
 _movement_cmd = {"action": "stop", "speed": 200, "timestamp": None}
 
+# Servo command queue (robot polls this)
+_last_servo_cmd = {"command": "SERVO:center", "timestamp": None}
+
 # Face tracking data (ken-vision polls this to send servo commands to brain)
 _face_tracking = {
     "detected": False,
@@ -1383,16 +1386,24 @@ def servo_poll():
 @app.post("/servo")
 async def servo_command(request: Request):
     """Direct servo control. Body: {"pan": 90, "tilt": 90} or {"action": "center"}"""
+    global _last_servo_cmd
     body = await request.json()
     action = body.get("action", "")
 
     if action == "center":
         _face_tracking["detected"] = False
+        _last_servo_cmd = {"command": "SERVO:center", "timestamp": datetime.utcnow().isoformat()}
         return {"status": "ok", "command": "SERVO:center"}
     
     pan = body.get("pan", 90)
     tilt = body.get("tilt", 90)
+    _last_servo_cmd = {"command": f"SERVO:{pan}:{tilt}", "timestamp": datetime.utcnow().isoformat()}
     return {"status": "ok", "command": f"SERVO:{pan}:{tilt}"}
+
+@app.get("/servo/poll")
+def servo_poll():
+    """Robot polls for servo commands."""
+    return _last_servo_cmd
 
 @app.post("/mode")
 async def set_mode(request: Request):
