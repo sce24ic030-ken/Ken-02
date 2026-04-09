@@ -1,0 +1,15 @@
+[Unit]
+Description=KEN Cloud Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ken-server
+EnvironmentFile=/home/ubuntu/ken-server/.env
+ExecStart=/home/ubuntu/ken-server/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
