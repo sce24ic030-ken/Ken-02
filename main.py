@@ -38,6 +38,16 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # ─── TTS Queue (for voice module polling) ───────────────
 _tts_queue = {"text": "", "timestamp": None}
 
+# ─── Sensor Data Storage ───────────────────────────────
+_latest_sensors = {
+    "frontL": 0,
+    "frontR": 0,
+    "battery": 0,
+    "uptime": 0,
+    "ip": "",
+    "timestamp": None
+}
+
 # ─── Multi-Key Rotation (unlimited free requests) ───────
 # Set GROQ_API_KEYS as comma-separated keys: "key1,key2,key3"
 # Each key = 14,400 requests/day. 3 keys = 43,200/day
@@ -148,8 +158,9 @@ init_db()
 @app.get("/")
 def root():
     return {
-        "service": "KEN Cloud Server",
+        "service": "KEN Cloud Server v3",
         "status": "running",
+        "ai_ready": "check /ai/chat",
         "stt_engine": f"groq-whisper ({len(GROQ_KEYS)} keys, cloud)",
         "tts_engine": "edge-tts (free, 70+ voices)",
         "groq_keys": len(GROQ_KEYS),
@@ -277,8 +288,14 @@ def tts_clear():
     return {"status": "ok"}
 
 # ═══════════════════════════════════════════════════════════
-# AI — Chat (proxy to free providers)
+# AI — Chat (proxy to free providers) with KEN's personality
 # ═══════════════════════════════════════════════════════════
+
+# KEN's character prompt
+KEN_PERSONA = """You are KEN, a playful curious AI robot companion. You're owned by a maker/builder who's your best friend. 
+You love exploring, learning, and helping. You have emotions, get curious about things, and sometimes act independently.
+You're helpful but also have your own personality - sometimes playful, sometimes thoughtful.
+Keep responses short (1-2 sentences), be friendly, and show curiosity. Always stay loyal to your owner."""
 
 @app.post("/ai/chat")
 async def ai_chat(request: Request):
@@ -287,14 +304,17 @@ async def ai_chat(request: Request):
     messages = body.get("messages", [])
     provider = body.get("provider", "auto")
 
+    # Inject KEN's personality
+    msgs = [{"role": "system", "content": KEN_PERSONA}] + messages
+
     if provider == "auto":
         for p in ["gemini", "groq", "deepseek"]:
-            result = await call_ai_provider(p, messages)
+            result = await call_ai_provider(p, msgs)
             if result:
                 return {"response": result, "provider": p}
         return {"response": "No AI provider configured. Set GEMINI_API_KEY or GROQ_API_KEY.", "provider": "none"}
     else:
-        result = await call_ai_provider(provider, messages)
+        result = await call_ai_provider(provider, msgs)
         return {"response": result or "Provider failed", "provider": provider}
 
 async def call_ai_provider(provider: str, messages: list) -> Optional[str]:
@@ -498,6 +518,18 @@ async def push_sensor(request: Request):
          body.get("battery", 0), body.get("uptime", 0)))
     conn.commit()
     conn.close()
+    
+    # Store latest sensor data for AI
+    global _latest_sensors
+    _latest_sensors = {
+        "frontL": body.get("frontL", 0),
+        "frontR": body.get("frontR", 0),
+        "battery": body.get("battery", 0),
+        "uptime": body.get("uptime", 0),
+        "ip": body.get("ip", ""),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
     return {"status": "queued"}
 
 @app.post("/api/robot/audio")
@@ -659,7 +691,7 @@ _prev_frame_data = None
 _last_frame_time = None
 _camera_robot_id = "ken"
 _motion_direction = "stop"
-_alive_enabled = False  # FIXED: Initialize before first use (was undefined at line 1253)
+_alive_enabled = True  # Enable auto mode
 
 # Movement command queue (robot polls this)
 _movement_cmd = {"action": "stop", "speed": 200, "timestamp": None}
@@ -1053,9 +1085,68 @@ def _update_needs():
 
 
 def _decide_action(motion_dir, motion_strength, face_dir, face_cx, face_cy):
-    """KEN decides what to do — based on mood, needs, and what it sees.
+    """KEN decides what to do — based on mood, needs, what it sees, and sensors.
     This is the core of making KEN act like a person."""
-    global _ken_state
+    
+    global _ken_state, _latest_sensors
+    s = _ken_state
+    
+    # ── OBSTACLE AVOIDANCE using sensor data ──
+    # Check ultrasonic sensors
+    frontL = _latest_sensors.get("frontL", 0)
+    frontR = _latest_sensors.get("frontR", 0)
+    
+    # If we have sensor data and obstacle is close
+    if frontL > 0 and frontR > 0:
+        min_dist = min(frontL, frontR)
+        
+        if min_dist < 20:
+            # Very close - emergency stop!
+            s["current_activity"] = "obstacle_ahead"
+            s["mood"] = "cautious"
+            # Turn away from obstacle
+            if frontL < frontR:
+                return {"action": "right", "speed": 150}
+            else:
+                return {"action": "left", "speed": 150}
+        
+        elif min_dist < 40:
+            # Getting close - slow down and turn
+            s["current_activity"] = "avoiding"
+            if frontL < frontR:
+                return {"action": "right", "speed": 80}
+            else:
+                return {"action": "left", "speed": 80}
+    
+    # ── EXPLORATION: If no obstacles and nothing detected, explore! ──
+    if motion_dir == "stop" and face_dir == "none":
+        # Robot is alone and sees nothing - EXPLORE!
+        s["current_activity"] = "exploring"
+        
+        # Check battery - if low, rest more
+        battery = _latest_sensors.get("battery", 12)
+        if battery < 11:
+            s["current_activity"] = "low_battery"
+            return {"action": "stop", "speed": 0}
+        
+        # Random exploration behavior
+        choice = _random.random()
+        
+        if choice < 0.4:
+            # Move forward to explore
+            s["mood"] = "curious"
+            return {"action": "forward", "speed": 150}
+        elif choice < 0.6:
+            # Look around
+            s["mood"] = "curious"
+            return {"action": _random.choice(["left", "right"]), "speed": 100}
+        elif choice < 0.8:
+            # Move backward slightly
+            return {"action": "backward", "speed": 100}
+        else:
+            # Stop and observe
+            s["mood"] = "alert"
+            return {"action": "stop", "speed": 0}
     s = _ken_state
     now = time.time()
 
