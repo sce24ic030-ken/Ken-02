@@ -855,6 +855,100 @@ def _check_obedience_timeout():
         _ken_state["thought"] = _get_return_response()
         _ken_state["mood"] = _random.choice(["curious", "playful", "happy"])
 
+# ═══════════════════════════════════════════════════════════
+# AI VISION — Analyze frames and decide actions
+# ═══════════════════════════════════════════════════════════
+import base64
+
+# Rate limit AI vision (process every N frames)
+_ai_vision_frame_count = 0
+_ai_vision_last_analysis = ""
+_ai_vision_enabled = os.environ.get("AI_VISION_ENABLED", "true").lower() == "true"
+
+
+async def analyze_frame_with_ai(frame_bytes: bytes) -> Optional[dict]:
+    """Send frame to Groq Vision and get action decision."""
+    global _ai_vision_frame_count, _ai_vision_last_analysis
+    
+    _ai_vision_frame_count += 1
+    
+    # Only analyze every 10th frame to save API calls
+    if _ai_vision_frame_count % 10 != 0:
+        return None
+    
+    key = get_next_groq_key()
+    if not key:
+        return None
+    
+    try:
+        # Encode image to base64
+        img_b64 = base64.b64encode(frame_bytes).decode("utf-8")
+        
+        prompt = """You are KEN's vision AI. Analyze this image and respond ONLY with a JSON object:
+{
+  "what": "brief description of what you see (1-5 words)",
+  "action": "forward, backward, left, right, or stop",
+  "speed": 150-250,
+  "reason": "why you chose this action (1-10 words)"
+}
+
+Rules:
+- If person/animal approaching → "stop" to let them come to you
+- If person moving away → "forward" to follow
+- If movement on left → "left" to track
+- If movement on right → "right" to track  
+- If nothing interesting → "stop"
+- Respond ONLY with valid JSON, no other text."""
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": "llama-3.2-11b-vision-instant",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                                {"type": "text", "text": prompt}
+                            ]
+                        }
+                    ],
+                    "max_tokens": 256,
+                    "temperature": 0.3
+                }
+            )
+            
+            if resp.status_code != 200:
+                return None
+            
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            
+            # Parse JSON from response
+            import re
+            json_match = re.search(r'\{[^}]+\}', content)
+            if json_match:
+                result = json.loads(json_match.group())
+                _ai_vision_last_analysis = result.get("what", "")
+                
+                # Update motion direction based on AI decision
+                action = result.get("action", "stop")
+                speed = int(result.get("speed", 200))
+                
+                return {
+                    "what": result.get("what", ""),
+                    "action": action,
+                    "speed": speed,
+                    "reason": result.get("reason", "")
+                }
+    except Exception as e:
+        print(f"[!] AI vision error: {e}")
+    
+    return None
+
+
 def detect_motion(prev_bytes, curr_bytes):
     """Lightweight motion detection — compares frame regions."""
     try:
@@ -1368,6 +1462,25 @@ async def camera_upload(request: Request):
         _face_tracking["detected"] = False
         _face_tracking["timestamp"] = datetime.utcnow().isoformat()
 
+    # ── AI Vision: Analyze frame and decide action ──
+    ai_decision = None
+    if _ai_vision_enabled:
+        ai_decision = await analyze_frame_with_ai(body)
+        if ai_decision:
+            # Override motion based on AI decision
+            action = ai_decision.get("action", "stop")
+            speed = ai_decision.get("speed", 200)
+            _motion_direction = action
+            
+            # Update move/poll for brain
+            _movement_cmd = {
+                "action": action,
+                "speed": speed,
+                "timestamp": datetime.utcnow().isoformat(),
+                "ai_reason": ai_decision.get("reason", ""),
+                "ai_what": ai_decision.get("what", "")
+            }
+
     # KEN is alive — make decisions like a person
     if _alive_enabled:
         run_human_behavior()
@@ -1377,7 +1490,10 @@ async def camera_upload(request: Request):
         "size": len(body),
         "mood": _ken_state["mood"],
         "activity": _ken_state["current_activity"],
-        "face_detected": _face_tracking["detected"]
+        "face_detected": _face_tracking["detected"],
+        "ai_vision": ai_decision is not None,
+        "ai_what": ai_decision.get("what", "") if ai_decision else None,
+        "ai_action": ai_decision.get("action", "") if ai_decision else None
     }
 
 @app.get("/camera/latest")
