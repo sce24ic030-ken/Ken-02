@@ -522,15 +522,19 @@ async def push_sensor(request: Request):
     # Store latest sensor data for AI
     global _latest_sensors
     _latest_sensors = {
-        "frontL": body.get("frontL", 0),
-        "frontR": body.get("frontR", 0),
+        "usL": body.get("usL", 0),       # Ultrasonic left
+        "usR": body.get("usR", 0),       # Ultrasonic right
+        "irFL": body.get("irFL", 0),      # IR Front Left
+        "irFR": body.get("irFR", 0),      # IR Front Right
+        "irRL": body.get("irRL", 0),      # IR Rear Left
+        "irRR": body.get("irRR", 0),     # IR Rear Right
         "battery": body.get("battery", 0),
         "uptime": body.get("uptime", 0),
         "ip": body.get("ip", ""),
         "timestamp": datetime.utcnow().isoformat()
     }
     
-    return {"status": "queued"}
+    return {"status": "queued", "sensors": _latest_sensors}
 
 @app.post("/api/robot/audio")
 async def push_audio(
@@ -884,21 +888,25 @@ async def analyze_frame_with_ai(frame_bytes: bytes) -> Optional[dict]:
         # Encode image to base64
         img_b64 = base64.b64encode(frame_bytes).decode("utf-8")
         
-        prompt = """You are KEN's vision AI. Analyze this image and respond ONLY with a JSON object:
-{
-  "what": "brief description of what you see (1-5 words)",
-  "action": "forward, backward, left, right, or stop",
-  "speed": 150-250,
-  "reason": "why you chose this action (1-10 words)"
-}
+        prompt = f"""You are KEN's robot brain. KEN has sensors: Ultrasonic distance (cm), IR edge detectors (1=detected/0=clear).
+
+Current sensor readings:
+- Ultrasonic Left: {_latest_sensors.get('usL', 0)}cm
+- Ultrasonic Right: {_latest_sensors.get('usR', 0)}cm  
+- IR Front Left: {_latest_sensors.get('irFL', 0)} (1=edge detected)
+- IR Front Right: {_latest_sensors.get('irFR', 0)}
+- IR Rear Left: {_latest_sensors.get('irRL', 0)}
+- IR Rear Right: {_latest_sensors.get('irRR', 0)}
+
+Analyze the image AND sensors, then respond ONLY with JSON:
+{{"what": "description", "action": "forward|backward|left|right|stop", "speed": 150-250, "reason": "why"}}
 
 Rules:
-- If person/animal approaching → "stop" to let them come to you
-- If person moving away → "forward" to follow
-- If movement on left → "left" to track
-- If movement on right → "right" to track  
-- If nothing interesting → "stop"
-- Respond ONLY with valid JSON, no other text."""
+- If US sees obstacle <25cm → avoid (turn opposite direction)
+- If IR detects edge → go opposite direction
+- If all IR clear → make your own decision based on image
+- If person approaching → stop to let them come
+- If nothing interesting → stop"""
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
